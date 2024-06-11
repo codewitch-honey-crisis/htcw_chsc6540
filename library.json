@@ -1,6 +1,6 @@
 {
     "name": "htcw_chsc6540",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Provides support for the CHSC6540 capacitive touch panel",
     "keywords": ["touch", "capacitive", "touch-panel", "lcd"],
     "authors": {

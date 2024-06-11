@@ -37,12 +37,16 @@ namespace arduino {
 #include <stdio.h>
 #include <string.h>
 
-#include "driver/gpio.h"
-#include "driver/i2c.h"
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-#include "freertos/task.h"
+#include <driver/gpio.h>
+#include <esp_idf_version.h>
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+#include <driver/i2c_master.h>
+#else
+#include <driver/i2c.h>
+#endif
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 namespace esp_idf {
 #endif
 
@@ -52,11 +56,19 @@ class chsc6540 final {
 #ifdef ARDUINO
     TwoWire& m_i2c;
 #else
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+    i2c_master_bus_handle_t m_i2c_bus;
+    i2c_master_dev_handle_t m_i2c;
+    static uint32_t millis() {
+        return pdTICKS_TO_MS(xTaskGetTickCount());
+    }
+#else
     constexpr static const uint8_t ACK_CHECK_EN = 0x1;
     constexpr static const uint8_t ACK_CHECK_DIS = 0x0;
     constexpr static const uint8_t ACK_VAL = 0x0;
     constexpr static const uint8_t NACK_VAL = 0x1;
     i2c_port_t m_i2c;
+#endif
 #endif
     uint8_t m_rotation;
     bool m_initialized;
@@ -98,17 +110,22 @@ class chsc6540 final {
         }
         return result;
 #else
+        uint8_t result;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        result = r;
+        i2c_master_transmit_receive(m_i2c,&result,1,&result,1,1000);
+#else
         i2c_cmd_handle_t cmd = i2c_cmd_link_create();
         i2c_master_start(cmd);
         i2c_master_write_byte(cmd, address << 1 | I2C_MASTER_WRITE, ACK_CHECK_EN);
         i2c_master_write_byte(cmd, r, I2C_MASTER_ACK);
         i2c_master_start(cmd);
         i2c_master_write_byte(cmd, (address << 1) | I2C_MASTER_READ, true);
-        uint8_t result;
         i2c_master_read_byte(cmd, &result, I2C_MASTER_NACK);
         i2c_master_stop(cmd);
         i2c_master_cmd_begin(m_i2c, cmd, pdMS_TO_TICKS(1000));
         i2c_cmd_link_delete(cmd);
+#endif
         return result;
 #endif
     }
@@ -124,17 +141,23 @@ class chsc6540 final {
         }
         return result;
 #else
+        size_t result = data_size;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        uint8_t tmp = r;
+        i2c_master_transmit_receive(m_i2c,&tmp,1,out_data,data_size, 1000);
+#else
         i2c_cmd_handle_t cmd = i2c_cmd_link_create();
         i2c_master_start(cmd);
         i2c_master_write_byte(cmd, address << 1 | I2C_MASTER_WRITE, ACK_CHECK_EN);
         i2c_master_write_byte(cmd, r, I2C_MASTER_ACK);
         i2c_master_start(cmd);
         i2c_master_write_byte(cmd, (address << 1) | I2C_MASTER_READ, true);
-        size_t result = data_size;
+        
         i2c_master_read(cmd, out_data, size, I2C_MASTER_NACK);
         i2c_master_stop(cmd);
         i2c_master_cmd_begin(m_i2c, cmd, pdMS_TO_TICKS(1000));
         i2c_cmd_link_delete(cmd);
+#endif
         return result;
 #endif
     }
@@ -145,6 +168,10 @@ class chsc6540 final {
         m_i2c.write((uint8_t)value);
         m_i2c.endTransmission();
 #else
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        uint8_t tmp[] = {(uint8_t)r,(uint8_t)value};
+        i2c_master_transmit(m_i2c,tmp,sizeof(tmp),1000);
+#else
         i2c_cmd_handle_t cmd = i2c_cmd_link_create();
         i2c_master_start(cmd);
         i2c_master_write_byte(cmd, address << 1 | I2C_MASTER_WRITE, ACK_CHECK_EN);
@@ -154,6 +181,7 @@ class chsc6540 final {
         i2c_master_cmd_begin(m_i2c, cmd, pdMS_TO_TICKS(1000));
         i2c_cmd_link_delete(cmd);
 #endif
+#endif
     }
     bool read_all() {
        
@@ -162,7 +190,7 @@ class chsc6540 final {
         // data can also get corrupted if reads are too close together.
         if (millis() - m_read_ts < interval) return false;
         m_read_ts = millis();
-       uint8_t pts = 0;
+       //uint8_t pts = 0;
         uint8_t p0f = 0;
 
         if (pressed())
@@ -241,9 +269,20 @@ class chsc6540 final {
 #ifdef ARDUINO
         TwoWire& i2c = Wire
 #else
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        i2c_master_bus_handle_t i2c
+#else
         i2c_port_t i2c = I2C_NUM_0
 #endif
-        ) : m_i2c(i2c), m_rotation(0), m_touches(0) {
+#endif
+        ) :  
+#if defined(ARDUINO) || ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 0, 0)
+        m_i2c(i2c), 
+#else
+        m_i2c_bus(i2c),
+        m_i2c(nullptr),
+#endif
+     m_rotation(0), m_touches(0) {
     }
 
     bool initialized() const {
@@ -259,15 +298,25 @@ class chsc6540 final {
             //disable interrupt
             io_conf.intr_type = GPIO_INTR_DISABLE;
             //set as output mode
-            io_conf.mode = GPIO_MODE_OUTPUT;
+            io_conf.mode = GPIO_MODE_INPUT;
             //bit mask of the pins that you want to set,e.g.GPIO18/19
-            io_conf.pin_bit_mask = 1U<<interrupt_pin;
+            io_conf.pin_bit_mask = uint64_t(1)<<interrupt_pin;
             //disable pull-down mode
-            io_conf.pull_down_en = 0;
+            io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
             //disable pull-up mode
-            io_conf.pull_up_en = 0;
+            io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
             //configure GPIO with the given settings
             gpio_config(&io_conf);   
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+            i2c_device_config_t dev_cfg;
+            memset(&dev_cfg,0,sizeof(dev_cfg));
+            dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+            dev_cfg.device_address = address;
+            dev_cfg.scl_speed_hz = 100*1000;
+            if(ESP_OK!=i2c_master_bus_add_device(m_i2c_bus, &dev_cfg, &m_i2c)) {
+                return false;
+            }
+#endif      
 #endif
             
 #ifdef ARDUINO
@@ -329,4 +378,4 @@ class chsc6540 final {
         return read_all();
     }
 };
-}  // namespace arduino
+}  // namespace arduino/esp_idf
